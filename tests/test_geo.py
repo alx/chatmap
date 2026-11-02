@@ -117,3 +117,45 @@ def test_to_geojson_empty():
     gj = to_geojson([], title="t")
     assert gj["features"] == []
     assert gj["bbox"] is None
+
+
+# --- regressions found on a real 70-link export -----------------------------
+
+def test_google_maps_name_taken_from_place_segment_not_data_blob():
+    from chatmap.geo import page_title
+
+    url = ("https://www.google.com/maps/place/KL+Forest+Eco+Park/"
+           "@3.1513804,101.702139,15z/data=!4m6!3m5!1s0x31cc492539c32ab5!8m2!3d3.15!4d101.7")
+    name = page_title(url)
+    assert name == "Kl Forest Eco Park"
+    assert "Data" not in name and "4M6" not in name
+
+
+def test_google_maps_coords_with_tilt_and_heading():
+    # "@5.372,100.328,1895a,35y,337.96h,44.44t" — the tail is not always "15z"
+    url = "https://www.google.com/maps/place/Rubbish+Mountain/@5.3721597,100.3282053,1895a,35y,337.96h,44.44t/data=!3m1!1e3"
+    assert coords_from_url(url) == (5.3721597, 100.3282053, "url_at")
+
+
+def test_listing_title_area_extraction():
+    from chatmap.geo import area_from_title
+
+    assert area_from_title("Appartement · Kuala Lumpur · ★4,84 · 1 chambre") == "Kuala Lumpur"
+    assert area_from_title("Appart'hôtel · Bandar Tanjung Tokong · ★4,84") == "Bandar Tanjung Tokong"
+    assert area_from_title("Home exchange: Maizuru - Marie's home - Maizuru/Japan") is None
+
+
+def test_akiya_and_homeexchange_categorised_as_stay():
+    assert categorise("https://www.yabuakiyabank.jp/") == "Stay"
+    assert categorise("https://akiyaair.com/x") == "Stay"
+    assert categorise("https://www.homeexchange.com/homes/x") == "Stay"
+
+
+def test_region_guess_ignores_incidental_mentions_in_body():
+    """A page about HK ferries must not be pinned to a country it merely links to."""
+    from chatmap.geo import guess_place_name
+
+    # title says nothing; body text is unavailable offline, so there is no guess
+    assert guess_place_name("https://example.invalid/x", "SkyPier Terminal Ferry") is None
+    # a title that names a place is still trusted
+    assert guess_place_name("https://example.invalid/x", "Hotel in Kyoto") == "Kyoto"

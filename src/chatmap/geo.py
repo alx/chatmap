@@ -37,7 +37,9 @@ CATEGORIES: dict[str, dict] = {
 
 _DOMAIN_CATEGORY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(airbnb|booking\.com|agoda|hostelworld|trip\.com/hotels|expedia|mokomoko|"
-                r"athome\.jp|suumo|jalan\.net|rakuten-travel|tabelog\.com/.*/hotel|vrbo)", re.I), "Stay"),
+                r"athome\.jp|suumo|jalan\.net|rakuten-travel|tabelog\.com/.*/hotel|vrbo|"
+                r"homeexchange|akiya|akiyaair|yabuakiyabank|空き家|"
+                r"trip\.com/(?:w|moments)|wikipedia\.org/wiki/(?:Akiya|Ryokan))", re.I), "Stay"),
     (re.compile(r"(tabelog|gurunavi|hotpepper|retty|yelp|thefork|opentable|/restaurant)", re.I), "Food"),
     (re.compile(r"(klook|getyourguide|viator|airbnb\.com/experiences|activity)", re.I), "Activity"),
     (re.compile(r"(maps\.app\.goo\.gl|google\.[a-z.]+/maps|openstreetmap\.org|osm\.org)", re.I), "Other"),
@@ -64,6 +66,31 @@ _KNOWN_PLACES = [
     "Bali", "Malaysia", "Thailand", "Vietnam", "Korea", "Taiwan", "Portugal", "Italy",
 ]
 _PLACE_RE = re.compile(r"\b(" + "|".join(map(re.escape, _KNOWN_PLACES)) + r")\b", re.I)
+
+# "Appartement · Kuala Lumpur · ★4,84 · 1 chambre" — listing titles put the area
+# in the second bullet-delimited field. Short ones are cities worth geocoding.
+_TITLE_AREA = re.compile(r"[·|]\s*([^·|★]{3,40}?)\s*(?:[·|★]|$)")
+
+
+def area_from_title(title: str) -> str | None:
+    """Pull a city/neighbourhood out of a listing title."""
+    if not title:
+        return None
+    for match in _TITLE_AREA.finditer(title):
+        candidate = match.group(1).strip(" ,.-·|")
+        if not candidate or len(candidate) < 3:
+            continue
+        if re.search(r"\d", candidate):            # ratings, prices, room counts
+            continue
+        if re.search(r"(€|\$|¥|£|EUR|USD)", candidate, re.I):
+            continue
+        if re.fullmatch(r"(studio|chambre|chambres|bedroom|bedrooms|lit|lits|bed|beds|"
+                        r"appartement|appart'hôtel|maison|house|villa)", candidate, re.I):
+            continue
+        # a plain capitalised place name, optionally with a spelling variant after a comma
+        if re.fullmatch(r"[\w'’\-]+(?:[\s.\-]+[\w'’\-]+){0,4}", candidate, re.I):
+            return candidate
+    return None
 
 _TITLE_JUNK = re.compile(
     r"\s*[|·—–-]\s*(Airbnb|Booking\.com|Agoda|Trip\.com|Tabelog|食べログ|Tripadvisor|"
@@ -171,13 +198,28 @@ def page_text(url: str) -> str:
 
 
 def guess_place_name(url: str, title: str = "") -> str | None:
-    """Guess which city/prefecture a page is about (JS app listings have no coords)."""
-    for haystack in (title, page_text(url)):
-        if not haystack:
-            continue
-        m = _PLACE_RE.search(haystack)
+    """Guess which city/prefecture a page is about (JS app listings have no coords).
+
+    The title is trusted. Body text is only a fallback, and only its head: a
+    page about Hong Kong ferries routinely name-drops a dozen other countries
+    in nav, footers and route lists, so scanning all of it produces confident
+    nonsense. Prefer the *first* place mentioned near the start instead.
+    """
+    if title:
+        m = _PLACE_RE.search(title)
         if m:
             return m.group(1)
+
+    body = page_text(url)
+    if not body:
+        return None
+    # Only the opening slice: that is where "About this place" text lives.
+    # Require the place name to appear at least 3 characters in, so a page
+    # whose first word is "Vietnam" in a menu doesn't win by default.
+    head = body[:1500]
+    m = _PLACE_RE.search(head)
+    if m and m.start() > 2:
+        return m.group(1)
     return None
 
 
@@ -247,27 +289,47 @@ def page_title(url: str) -> str:
 
 
 def _name_from_path(parsed: urllib.parse.ParseResult) -> str:
-    """Readable name from the URL path: /rooms/1234-nice-flat → 'Nice Flat'."""
-    segments = [s for s in parsed.path.strip("/").split("/") if s]
-    # Walk backwards for the first segment that reads like a name, not an id/code.
+    """Readable name from the URL path: /place/KL+Forest+Eco+Park/@3.1,101.7 → 'KL Forest Eco Park'."""
+    segments = [urllib.parse.unquote(s) for s in parsed.path.strip("/").split("/") if s]
+
+    # Google Maps says it outright: /maps/place/<Name>/data=!... — take <Name>.
+    if "place" in segments:
+        idx = segments.index("place")
+        if idx + 1 < len(segments):
+            candidate = _clean_slug(segments[idx + 1])
+            if candidate:
+                return candidate
+
+    # Otherwise walk backwards for the first segment that reads like a name.
     for slug in reversed(segments):
-        slug = urllib.parse.unquote(slug)
-        # Google Maps embeds the pin as its own path segment: /place/Name/@35.0,135.7,15z
-        if slug.startswith("@") or re.fullmatch(r"-?\d+(\.\d+)?,[-\d.,zhmd]+t?", slug):
-            continue
-        slug = re.sub(r"\.(html?|php|aspx?)$", "", slug, flags=re.I)
-        slug = re.sub(r"[-_+.]+", " ", slug)
-        slug = re.sub(r"\b\d{3,}\b", " ", slug)          # listing ids
-        slug = re.sub(r"\s+", " ", slug).strip()
-        if len(slug) < 4 or not re.search(r"[a-z\u00c0-\uffff]", slug, re.I):
-            continue
-        if re.fullmatch(r"(rooms?|property|hotel|activity|detail|search|index|e)", slug, re.I):
-            continue
-        # Tabelog/booking style area codes: A170101, 26000123
-        if re.fullmatch(r"[A-Z]?\d{3,}", slug.replace(" ", "").strip()):
-            continue
-        return slug[:100].title()
+        candidate = _clean_slug(slug)
+        if candidate:
+            return candidate
     return parsed.netloc.replace("www.", "")
+
+
+def _clean_slug(slug: str) -> str | None:
+    """Turn one path segment into a display name, or None if it carries none."""
+    # Map URLs embed their payload as path segments: @lat,lng,15z and data=!4m6!3m5!...
+    if slug.startswith(("@", "data=", "!")):
+        return None
+    if re.fullmatch(r"-?\d+(\.\d+)?,[-\d.,zhmd]+t?", slug):
+        return None
+    # Opaque tokens (percent-encoded blobs, share ids) read as one long unbroken run.
+    if re.fullmatch(r"[A-Za-z0-9_]+", slug) and len(slug) > 18:
+        return None
+    slug = re.sub(r"\.(html?|php|aspx?)$", "", slug, flags=re.I)
+    slug = re.sub(r"[-_+.]+", " ", slug)
+    slug = re.sub(r"\b\d{3,}\b", " ", slug)          # listing ids
+    slug = re.sub(r"\s+", " ", slug).strip()
+    if len(slug) < 4 or not re.search(r"[a-z\u00c0-\uffff]", slug, re.I):
+        return None
+    if re.fullmatch(r"(rooms?|property|hotel|activity|detail|search|index|e|maps?|place)", slug, re.I):
+        return None
+    # Tabelog/booking style area codes: A170101, 26000123
+    if re.fullmatch(r"[A-Z]?\d{3,}", slug.replace(" ", "").strip()):
+        return None
+    return slug[:100].title()
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +337,9 @@ def _name_from_path(parsed: urllib.parse.ParseResult) -> str:
 # ---------------------------------------------------------------------------
 
 # @35.0116,135.7681,15z  and  /@35.0116,135.7681
-_AT_COORDS = re.compile(r"@(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})")
+# The tail after the two numbers is not always "15z": Google also emits
+# "@5.372,100.328,1895a,35y,337.96h,44.44t" (tilt/heading). Only the pair matters.
+_AT_COORDS = re.compile(r"@(-?\d{1,2}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})(?=[,\s]|$)")
 # !3d35.0116!4d135.7681
 _DMS_COORDS = re.compile(r"!3d(-?\d{1,2}\.\d{3,})!4d(-?\d{1,3}\.\d{3,})")
 # ?q=35.0116,135.7681  / ?ll=35.0116,135.7681  / ?center=35.0116,135.7681
@@ -397,6 +461,9 @@ def build_place(url: str, *, author: str = "", timestamp: str = "", notes: str =
         if city := city_from_url(resolved_url):
             place.notes = (place.notes + f" · city: {city}").strip(" ·")
             queries.append(city)
+        if title_area := area_from_title(place.name):
+            place.notes = (place.notes + f" · city: {title_area}").strip(" ·")
+            queries.append(title_area)
         if place.name and place.name != domain and not is_generic_title(place.name):
             queries.append(place.name)
         queries.append(domain)
@@ -405,7 +472,7 @@ def build_place(url: str, *, author: str = "", timestamp: str = "", notes: str =
                 place.lat, place.lng = coords
                 place.coord_source = "nominatim"
                 # a bare region/city lands on a centroid — say so honestly
-                place.coord_accuracy = "low" if query in (region, city) else "medium"
+                place.coord_accuracy = "low" if query in (region, city, title_area) else "medium"
                 break
 
     if place.lat is not None:
