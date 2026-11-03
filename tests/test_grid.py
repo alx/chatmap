@@ -97,3 +97,38 @@ def test_cells_to_geojson_shape():
     assert f["geometry"]["type"] == "Point"
     assert f["geometry"]["coordinates"] == [135.8, 35.0]
     assert f["properties"]["score"] == 88
+
+
+def test_heatmap_has_no_redeclared_score():
+    """Regression: `let score` plus `const score` in one block is a SyntaxError
+    that blanked the whole page."""
+    import re as _re
+
+    from chatmap import heatmap
+
+    grid = {
+        "type": "FeatureCollection",
+        "_meta": {"cell_m": 10000, "listings": 1, "pois": 1, "aoi": "x"},
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[135.7, 34.9], [135.8, 34.9],
+                                     [135.8, 35.0], [135.7, 34.9]]],
+                },
+                "properties": {"score": 50},
+            }
+        ],
+    }
+    out = heatmap.render(grid, [], title="t")
+    block = out.split("for (let py")[1].split("ctx.putImageData")[0]
+    assert "let score" in block
+    assert "const score" not in block
+
+
+def test_heatmap_ramp_endpoints_are_blue_and_red():
+    from chatmap import heatmap
+
+    assert "44, 123, 182" in heatmap.TEMPLATE   # blue = low
+    assert "224,  75,  58" in heatmap.TEMPLATE  # red = high
