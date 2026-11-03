@@ -35,7 +35,7 @@ BUCKETS: dict[str, str] = {
     "hospital": 'nwr["amenity"~"^(hospital|clinic|doctors)$"]; '
                 'nwr["healthcare"~"^(hospital|clinic)$"];',
     "konbini": 'nwr["shop"="convenience"]; '
-               'nwr["brand"~"^(7-Eleven|Lawson|FamilyMart|Ministop|Daily Yamazaki)$"i];',
+               'nwr["brand"~"^(7-Eleven|Lawson|FamilyMart|Ministop|Daily Yamazaki|セブン|ローソン|ファミリーマート)$"];',
     "fresh": 'nwr["shop"~"^(greengrocer|supermarket|butcher|seafood|market)$"]; '
              'nwr["amenity"="marketplace"];',
     "coffee": 'nwr["amenity"="cafe"]; nwr["shop"="coffee"];',
@@ -54,7 +54,17 @@ def build_query(bucket: str, aoi: dict | None = None, timeout: int = 180) -> str
     """
     a = aoi or AOI
     bbox = f"{a['sw_lat']},{a['sw_lon']},{a['ne_lat']},{a['ne_lon']}"
-    body = BUCKETS[bucket]
+    # Every clause must be bounded by the AOI bbox: an unbounded `nwr` would
+    # scan the whole database and Overpass rejects it (HTTP 400) rather than
+    # letting a query take the instance down.
+    clauses = []
+    for raw in BUCKETS[bucket].split(";"):
+        clause = raw.strip()
+        if not clause:
+            continue
+        # Correct Overpass QL: filters first, then the (bbox) selector.
+        clauses.append(f"{clause}({bbox});")
+    body = "\n".join(f"  {c}" for c in clauses)
     return f"[out:json][timeout:{timeout}];\n(\n{body}\n);\nout center tags;"
 
 

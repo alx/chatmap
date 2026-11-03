@@ -24,6 +24,7 @@ import array
 import io
 import json
 import math
+import statistics
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
@@ -118,7 +119,8 @@ class Dem:
                     samples.append(abs(e - h))
         if not samples:
             return None
-        grade = (max(samples) / step_m)
+        samples.sort()
+        grade = (samples[len(samples) // 2] / step_m)
         return math.degrees(math.atan(grade))
 
 
@@ -242,6 +244,26 @@ class GridBuilder:
             total_w += w
         return (score / total_w if total_w else 0.0), parts
 
+    def _terrain_sample(self, lat: float, lon: float) -> tuple[float | None, float | None]:
+        """Median elevation and slope over a small pattern inside the cell."""
+        offsets = [
+            (0.0, 0.0), (0.3, 0.3), (0.3, -0.3), (-0.3, 0.3), (-0.3, -0.3),
+            (0.45, 0.0), (-0.45, 0.0), (0.0, 0.45), (0.0, -0.45),
+        ]
+        elevs, slopes = [], []
+        for fy, fx in offsets:
+            sla = lat + fy * self.dlat
+            slo = lon + fx * self.dlon
+            e = self.dem.elevation(sla, slo)
+            if e is not None and e > -9000:
+                elevs.append(e)
+            s = self.dem.slope_deg(sla, slo)
+            if s is not None:
+                slopes.append(s)
+        elev = statistics.median(elevs) if elevs else None
+        slope = statistics.median(slopes) if slopes else None
+        return elev, slope
+
     def build(self, pois: dict | None = None) -> list[Cell]:
         pois = pois or {}
         listings = pois.get("listing") or []
@@ -252,16 +274,25 @@ class GridBuilder:
             for c in range(self.ncols):
                 lon = self.sw_lon + (c + 0.5) * self.dlon
 
-                elev = self.dem.elevation(lat, lon)
-                slope = self.dem.slope_deg(lat, lon)
+                # Sample several points per cell: a 10 km cell in Kyoto spans
+                # the city floor and a mountainside, and its centre alone is
+                # not representative. Terrain uses the median so one outlier
+                # (a gorge, a summit) does not define the whole cell.
+                elev, slope = self._terrain_sample(lat, lon)
 
                 # Terrain: avoid steep ground and both flood-prone and
                 # inconveniently high sites.
-                slope_s = 1.0 - _band_score(slope, 8.0, 25.0) if slope is not None else 0.5
+                # _band_score is 1.0 at/below "ideal" and 0.0 at/above "dead".
+                # For slope, ideal is FLAT (8 deg) and dead is steep (25 deg),
+                # so the score is used directly — inverting it would reward
+                # cliffs and punish the city floor.
+                slope_s = _band_score(slope, 8.0, 25.0) if slope is not None else 0.5
                 if elev is None or elev <= -9999:
                     elev_s = 0.5
-                elif elev < 3:
-                    elev_s = 0.2          # river plain: flood risk
+                elif elev < 1:
+                    elev_s = 0.2          # delta / below mean sea level: flood risk
+                elif elev < 5:
+                    elev_s = 0.7          # low alluvial plain: some flood risk
                 elif elev > 400:
                     elev_s = 0.35         # mountain hamlet
                 else:
