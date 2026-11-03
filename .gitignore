@@ -12,3 +12,10 @@ build/
 examples/out/
 signal-export/
 *.backup
+
+# Overpass extracts and self-hosted DB (hundreds of MB)
+*.osm.pbf
+*.osm.pbf.bz2
+*.osm.bz2
+/data/
+probe.log
