@@ -49,3 +49,16 @@ def test_iter_link_messages_only_yields_messages_with_links():
     assert link_msgs
     assert all(m.links for m in link_msgs)
     assert len(link_msgs) < len(messages)
+
+
+def test_underscore_in_url_is_not_a_terminator():
+    """Regression: URLs were cut at the first '_' ("sref=list_map" → "sref=list")."""
+    assert extract_links("https://www.athome.co.jp/kodate/1/?sref=list_map&DOWN=4") == [
+        "https://www.athome.co.jp/kodate/1/?sref=list_map&DOWN=4"
+    ]
+    assert extract_links("https://x.example/a_b_c") == ["https://x.example/a_b_c"]
+
+
+def test_trailing_markdown_emphasis_still_stripped():
+    assert extract_links("https://x.example/y**") == ["https://x.example/y"]
+    assert extract_links("https://x.example/z_") == ["https://x.example/z"]

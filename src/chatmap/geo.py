@@ -20,6 +20,19 @@ from dataclasses import dataclass, field, asdict
 from typing import Iterable
 
 USER_AGENT = "chatmap/0.1 (+https://github.com/alx/chatmap)"
+BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# Pages that are an interstitial rather than the place itself.
+_BOT_CHECK = re.compile(
+    r"(認証中|Just a moment\.\.\.|Checking your browser|cf-browser-verification|"
+    r"Enable JavaScript and cookies to continue)",
+    re.I,
+)
+
+
+def _looks_like_bot_check(text: str) -> bool:
+    return len(text) < 20_000 and bool(_BOT_CHECK.search(text))
 
 # ---------------------------------------------------------------------------
 # Categories
@@ -37,7 +50,7 @@ CATEGORIES: dict[str, dict] = {
 
 _DOMAIN_CATEGORY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(airbnb|booking\.com|agoda|hostelworld|trip\.com/hotels|expedia|mokomoko|"
-                r"athome\.jp|suumo|jalan\.net|rakuten-travel|tabelog\.com/.*/hotel|vrbo|"
+                r"athome\.co\.jp|suumo|jalan\.net|rakuten-travel|tabelog\.com/.*/hotel|vrbo|"
                 r"homeexchange|akiya|akiyaair|yabuakiyabank|空き家|"
                 r"trip\.com/(?:w|moments)|wikipedia\.org/wiki/(?:Akiya|Ryokan))", re.I), "Stay"),
     (re.compile(r"(tabelog|gurunavi|hotpepper|retty|yelp|thefork|opentable|/restaurant)", re.I), "Food"),
@@ -62,6 +75,9 @@ _KNOWN_PLACES = [
     # Japan — cities people name directly
     "Kanazawa", "Nagoya", "Sapporo", "Hakone", "Nikko", "Takayama", "Matsumoto", "Kobe",
     "Yokohama", "Kamakura", "Naha", "Sendai", "Kumamoto", "Kurashiki", "Takamatsu",
+    "Maizuru", "Itoshima", "Fukuoka", "Kitakyushu", "Shimonoseki", "Tokushima",
+    "Matsue", "Tottori", "Akita", "Aomori", "Morioka", "Fukushima", "Kofu", "Otsu",
+    "Nara", "Wakayama", "Himeba", "Tsu", "Yamaguchi", "Saga", "Miyazaki", "Kagoshima",
     # common travel countries, so the trick also works outside Japan
     "Bali", "Malaysia", "Thailand", "Vietnam", "Korea", "Taiwan", "Portugal", "Italy",
 ]
@@ -69,13 +85,42 @@ _PLACE_RE = re.compile(r"\b(" + "|".join(map(re.escape, _KNOWN_PLACES)) + r")\b"
 
 # "Appartement · Kuala Lumpur · ★4,84 · 1 chambre" — listing titles put the area
 # in the second bullet-delimited field. Short ones are cities worth geocoding.
-_TITLE_AREA = re.compile(r"[·|]\s*([^·|★]{3,40}?)\s*(?:[·|★]|$)")
+# Titles separate fields with · or |, and HomeExchange-style titles use " - ".
+_TITLE_AREA = re.compile(r"(?:[·|]|\s-\s)\s*([^·|★]{3,40}?)\s*(?:(?:[·|]|\s-\s|★)|$)")
+
+
+# Japanese addresses name the municipality before the ward: 福岡市早良区 (Fukuoka,
+# Sawara-ku), 糸島市 (Itoshima). Real-estate titles are built this way, and
+# Nominatim matches "福岡市早良区" but not the marketing prefix around it.
+_JA_CITY = re.compile(r"([\u4e00-\u9fff]{2,6}?[市区町村])")
+_JA_PREF = re.compile(r"([\u4e00-\u9fff]{2,4}?[都道府県])")
+
+
+def japanese_area(title: str) -> str | None:
+    """Pull a Japanese municipality out of a title, e.g. 福岡市早良区 → '福岡市早良区'."""
+    if not title:
+        return None
+    # Prefer the most specific: a city plus its ward, if present.
+    m = re.search(r"([\u4e00-\u9fff]{2,6}?[市区])([\u4e00-\u9fff]{1,6}?区)", title)
+    if m:
+        return m.group(1) + m.group(2)
+    m = _JA_CITY.search(title)
+    if m:
+        return m.group(1)
+    m = _JA_PREF.search(title)
+    if m:
+        return m.group(1)
+    return None
 
 
 def area_from_title(title: str) -> str | None:
     """Pull a city/neighbourhood out of a listing title."""
     if not title:
         return None
+    # A known place name anywhere in the title is the strongest signal.
+    if known := _PLACE_RE.search(_BRAND_WORDS.sub(" ", title)):
+        return known.group(1)
+
     for match in _TITLE_AREA.finditer(title):
         candidate = match.group(1).strip(" ,.-·|")
         if not candidate or len(candidate) < 3:
@@ -83,6 +128,8 @@ def area_from_title(title: str) -> str | None:
         if re.search(r"\d", candidate):            # ratings, prices, room counts
             continue
         if re.search(r"(€|\$|¥|£|EUR|USD)", candidate, re.I):
+            continue
+        if re.search(r"'s\b|’s\b", candidate):      # "Marie's home" is a host, not a place
             continue
         if re.fullmatch(r"(studio|chambre|chambres|bedroom|bedrooms|lit|lits|bed|beds|"
                         r"appartement|appart'hôtel|maison|house|villa)", candidate, re.I):
@@ -165,6 +212,21 @@ def fetch_text(url: str, timeout: float = 12.0) -> str | None:
             text = resp.read(400_000).decode(charset, errors="replace")
     except Exception:  # noqa: BLE001 - network is best effort
         text = None
+
+    # Some sites (Japanese real-estate portals notably) serve a bot-check page
+    # to unknown agents. One retry as a normal browser recovers the real page.
+    if text is None or _looks_like_bot_check(text):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": BROWSER_UA, "Accept-Language": "ja,en;q=0.8"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                charset = resp.headers.get_content_charset() or "utf-8"
+                retry_text = resp.read(400_000).decode(charset, errors="replace")
+            if not _looks_like_bot_check(retry_text):
+                text = retry_text
+        except Exception:  # noqa: BLE001
+            pass
+
     _cache[url] = text
     # be a good citizen
     delta = time.time() - _last_call
@@ -197,6 +259,10 @@ def page_text(url: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text))[:20_000]
 
 
+_BRAND_WORDS = re.compile(
+    r"(HomeExchange|Airbnb|Booking|Trip\.com|Agoda|Expedia|Klook|Hostelworld)", re.I)
+
+
 def guess_place_name(url: str, title: str = "") -> str | None:
     """Guess which city/prefecture a page is about (JS app listings have no coords).
 
@@ -206,7 +272,10 @@ def guess_place_name(url: str, title: str = "") -> str | None:
     nonsense. Prefer the *first* place mentioned near the start instead.
     """
     if title:
-        m = _PLACE_RE.search(title)
+        # Drop brand words first: "HomeExchange" contains no place, but a brand
+        # next to a real place name can win a naive first-match.
+        clean_title = _BRAND_WORDS.sub(" ", title)
+        m = _PLACE_RE.search(clean_title)
         if m:
             return m.group(1)
 
@@ -227,7 +296,7 @@ def guess_place_name(url: str, title: str = "") -> str | None:
 _GENERIC_TITLES = re.compile(
     r"^(home|homepage|welcome|japan rail pass|jr pass|route search|vols pas chers|cheap flights|"
     r"skyscanner|hyperdia|google maps|airbnb|booking\.com|tabelog|食べログ|hostelworld|klook|"
-    r"trip\.com|agoda|just a moment.*|access denied|forbidden|error.*)$",
+    r"trip\.com|agoda|just a moment.*|認証中|access denied|forbidden|error.*)$",
     re.I,
 )
 
@@ -430,7 +499,8 @@ def categorise(url: str, title: str = "") -> str:
 
 
 def build_place(url: str, *, author: str = "", timestamp: str = "", notes: str = "",
-                hint: str = "", online: bool = True) -> Place:
+                hint: str = "", online: bool = True,
+                title_override: str | None = None) -> Place:
     """Turn one shared link into a :class:`Place`."""
     domain = urllib.parse.urlparse(url).netloc.replace("www.", "")
     place = Place(name="", url=url, domain=domain, author=author, timestamp=timestamp, notes=notes)
@@ -443,7 +513,10 @@ def build_place(url: str, *, author: str = "", timestamp: str = "", notes: str =
         place.lat, place.lng, place.coord_source = coords
         place.coord_accuracy = "high"
 
-    place.name = page_title(resolved_url) if online else (domain or url)
+    if title_override:
+        place.name = title_override
+    else:
+        place.name = page_title(resolved_url) if online else (domain or url)
     # A bare domain means the page told us nothing useful — label it by source instead.
     if not place.name or place.name in (domain, url):
         city = city_from_url(resolved_url)
@@ -454,16 +527,20 @@ def build_place(url: str, *, author: str = "", timestamp: str = "", notes: str =
     # city hidden in the URL, then the domain.
     if place.lat is None and online:
         queries: list[str] = []
+        title_area = area_from_title(place.name)
+        if title_area:
+            place.notes = (place.notes + f" · city: {title_area}").strip(" ·")
+            queries.append(title_area)
         region = guess_place_name(resolved_url, place.name)
-        if region:
+        if region and region not in queries:
             place.notes = (place.notes + f" · area: {region}").strip(" ·")
             queries.append(region)
         if city := city_from_url(resolved_url):
             place.notes = (place.notes + f" · city: {city}").strip(" ·")
             queries.append(city)
-        if title_area := area_from_title(place.name):
-            place.notes = (place.notes + f" · city: {title_area}").strip(" ·")
-            queries.append(title_area)
+        if ja_area := japanese_area(page_title(resolved_url)) or japanese_area(place.name):
+            place.notes = (place.notes + f" · area: {ja_area}").strip(" ·")
+            queries.append(ja_area)
         if place.name and place.name != domain and not is_generic_title(place.name):
             queries.append(place.name)
         queries.append(domain)

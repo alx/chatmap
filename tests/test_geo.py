@@ -142,7 +142,7 @@ def test_listing_title_area_extraction():
 
     assert area_from_title("Appartement · Kuala Lumpur · ★4,84 · 1 chambre") == "Kuala Lumpur"
     assert area_from_title("Appart'hôtel · Bandar Tanjung Tokong · ★4,84") == "Bandar Tanjung Tokong"
-    assert area_from_title("Home exchange: Maizuru - Marie's home - Maizuru/Japan") is None
+    assert area_from_title("Home exchange: Maizuru - Marie's home - Maizuru/Japan") == "Maizuru"
 
 
 def test_akiya_and_homeexchange_categorised_as_stay():
@@ -159,3 +159,42 @@ def test_region_guess_ignores_incidental_mentions_in_body():
     assert guess_place_name("https://example.invalid/x", "SkyPier Terminal Ferry") is None
     # a title that names a place is still trusted
     assert guess_place_name("https://example.invalid/x", "Hotel in Kyoto") == "Kyoto"
+
+
+def test_japanese_area_from_real_estate_titles():
+    """athome.co.jp titles name the municipality; that is what Nominatim matches."""
+    from chatmap.geo import japanese_area
+
+    assert japanese_area("【アットホーム】福陵ハイデンス 1階 ３ＬＤＫ[1017516187]福岡市早良区のマンション") == "福岡市早良区"
+    assert japanese_area("【アットホーム】糸島市 志摩師吉１丁目（筑前前原駅） 2階建 ３ＬＤＫ") == "糸島市"
+    assert japanese_area("東京都渋谷区の物件") == "東京都渋谷区"
+    assert japanese_area("【アットホーム】認証中") is None
+    assert japanese_area("Hoshinoya Tokyo") is None
+
+
+def test_bot_check_detection():
+    from chatmap.geo import _looks_like_bot_check
+
+    assert _looks_like_bot_check("<html><title>Just a moment...</title>")
+    assert _looks_like_bot_check("<title>【アットホーム】認証中</title>")
+    assert not _looks_like_bot_check("<title>Hotel in Kyoto</title>" + "x" * 30000)
+
+
+def test_athome_co_jp_not_jp_tld():
+    """Regression: the pattern said athome.jp, but the site is athome.co.jp."""
+    assert categorise("https://www.athome.co.jp/mansion/1017516187/") == "Stay"
+    assert categorise("https://www.athome.co.jp/kodate/1112938618/") == "Stay"
+
+
+def test_homeexchange_title_prefers_city_over_brand_and_host():
+    """Regression: pinned to Kyoto (35.01,135.77) instead of Maizuru (35.47,135.39)."""
+    from chatmap.geo import area_from_title
+
+    title = "Home exchange: Maizuru - Marie's home - Maizuru/Japan - HomeExchange"
+    assert area_from_title(title) == "Maizuru"
+
+
+def test_apostrophe_host_not_treated_as_area():
+    from chatmap.geo import area_from_title
+
+    assert area_from_title("Home exchange: X - Marie's home - nowhere") is None

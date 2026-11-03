@@ -47,9 +47,14 @@ class Message:
 
 
 def _clean_url(url: str) -> str:
+    """Trim trailing punctuation and markdown emphasis, without eating URL syntax.
+
+    Underscores are legal in URLs ("sref=list_map"), so they must not be treated
+    as a terminator — only trailing "*" / "_" runs left over from markdown bold
+    and italic markers get stripped.
+    """
     url = url.rstrip(_TRAILING)
-    # Strip trailing markdown/reaction artefacts such as "**" or "_- **"
-    url = re.split(r"[\s_*]", url)[0]
+    url = re.sub(r"[*_]+$", "", url)     # trailing markdown emphasis
     return url.rstrip(_TRAILING)
 
 

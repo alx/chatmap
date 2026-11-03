@@ -37,6 +37,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("No messages parsed — is the export path right?", file=sys.stderr)
         return 1
 
+    title_overrides: dict[str, str] = {}
+    if args.titles:
+        title_overrides = json.loads(Path(args.titles).read_text(encoding="utf-8"))
+
     places = []
     for msg in iter_link_messages(messages):
         for url in msg.links:
@@ -50,6 +54,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 notes=notes,
                 hint=args.hint,
                 online=not args.offline,
+                title_override=title_overrides.get(url),
             )
             places.append(place)
             print(f"  {place.category:9} {place.coord_accuracy:6} {place.name[:60]}", file=sys.stderr)
@@ -105,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--hint", default="", help="region hint appended to geocoding queries, e.g. 'Japan'")
     run.add_argument("--offline", action="store_true", help="no network: only URL-embedded coordinates")
     run.add_argument("--noindex", action="store_true", help='add <meta name="robots" content="noindex">')
+    run.add_argument(
+        "--titles",
+        metavar="FILE",
+        help="JSON file of {url: title} to use when the page itself is blocked "
+             "(bot checks, paywalls). Survives rate limits that break live scraping.",
+    )
     run.set_defaults(func=_cmd_run)
     return p
 
